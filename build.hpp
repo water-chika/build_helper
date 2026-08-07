@@ -145,7 +145,12 @@ auto c_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::
     std::ranges::for_each(
             src,
             [&sources](auto s) {
-                sources += " " + s;
+                if (std::filesystem::is_directory(sources)) {
+                    sources += " -I" + s;
+                }
+                else {
+                    sources += " " + s;
+                }
             }
             );
     auto command = std::format("{} {} -o {} -std=c++23 -ltbb", compiler.string(), sources, output_path.string());
@@ -225,7 +230,7 @@ enum class os {
 #ifdef _WIN32
 constexpr auto current_os = os::win32;
 #else
-constexpr current_os = os::linux;
+constexpr auto current_os = os::linux;
 #endif
 
 auto find_cxx_compiler() {
@@ -268,6 +273,24 @@ public:
     }
     void add_hip_executable(std::string name, std::convertible_to<std::string> auto... sources) {
         add_executable_help(name, build::hip_file_compile_action{}, sources...);
+    }
+    void add_library(std::string name, std::convertible_to<std::string> auto... sources) {
+        add_executable_help(name, [](const auto&){return build::update_res::success;}, sources...);
+    }
+    void add_dependency(std::string name, std::string dir) {
+        auto& target = m_name_map[name];
+        if (!m_name_map.contains(dir)) {
+            m_name_map[dir] = build::file(dir);
+        }
+        target->add_dependency(m_name_map[dir]);
+    }
+    void target_include_directory(std::string name, std::string dir) {
+        add_dependency(name, dir);
+    }
+    void target_link_library(std::string name, std::string lib) {
+        auto& target = m_name_map[name];
+        auto& lib_target = m_name_map[lib];
+        target->add_dependency(lib_target->get_dependencies());
     }
     auto build() {
         return m_graph.update();
