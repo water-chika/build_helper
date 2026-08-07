@@ -6,6 +6,9 @@
 #include <filesystem>
 #include <iostream>
 #include <execution>
+#include <unordered_set>
+#include <cstring>
+#include <cassert>
 
 namespace build {
 
@@ -145,9 +148,10 @@ auto c_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::
     std::ranges::for_each(
             src,
             [&sources](auto s) {
-                if (std::filesystem::is_directory(sources)) {
+                if (std::filesystem::is_directory(s)) {
                     sources += " -I" + s;
                 }
+                else if (s.ends_with(".hpp")) {}
                 else {
                     sources += " " + s;
                 }
@@ -160,15 +164,22 @@ auto c_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::
 auto c_plus_plus_compile(std::filesystem::path compiler, const std::string src, const std::filesystem::path& output_path) {
     return c_plus_plus_compile(compiler, std::vector<std::string>{src}, output_path);
 }
-auto amdclang_plus_plus_compile(const std::vector<std::string>& src, const std::filesystem::path& output_path) {
+auto amdclang_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::string>& src, const std::filesystem::path& output_path) {
     std::string sources = "";
     std::ranges::for_each(
             src,
             [&sources](auto s) {
-                sources += " " + s;
+                if (std::filesystem::is_directory(s)) {
+                    sources += " -I" + s;
+                }
+                else if (s.ends_with(".hpp")) {}
+                else {
+                    sources += " " + s;
+                }
             }
             );
-    auto command = std::format("amdclang++ -x hip --offload-arch=gfx1201 {} -o {} -std=c++23 -ltbb", sources, output_path.string());
+    auto command = std::format("{} -x hip --offload-arch=gfx1201 {} -o {} -std=c++23 -ltbb",
+            compiler.string(), sources, output_path.string());
     std::cout << command << std::endl;
     return system(command.c_str());
 }
@@ -199,27 +210,28 @@ struct cpp_file_compile_action {
     std::filesystem::path m_compiler;
 };
 struct hip_file_compile_action {
-auto operator()(const auto& target){
-    auto weak_sources = target.get_dependencies();
-    auto sources = std::vector<std::shared_ptr<build::file_object>>(weak_sources.size());
-    std::ranges::transform(
-            weak_sources,
-            sources.begin(),
-            [](auto e) {
-                return e.lock();
-            }
-            );
-    auto sources_string = std::vector<std::string>(sources.size());
-    std::ranges::transform(
-            sources,
-            sources_string.begin(),
-            [](auto& src) {
-                return src->get_file_path().string();
-            }
-            );
-    auto res = amdclang_plus_plus_compile(sources_string, target.get_file_path());
-    return res == 0 ? build::update_res::success : build::update_res::failed;
-}
+    auto operator()(const auto& target){
+        auto weak_sources = target.get_dependencies();
+        auto sources = std::vector<std::shared_ptr<build::file_object>>(weak_sources.size());
+        std::ranges::transform(
+                weak_sources,
+                sources.begin(),
+                [](auto e) {
+                    return e.lock();
+                }
+                );
+        auto sources_string = std::vector<std::string>(sources.size());
+        std::ranges::transform(
+                sources,
+                sources_string.begin(),
+                [](auto& src) {
+                    return src->get_file_path().string();
+                }
+                );
+        auto res = amdclang_plus_plus_compile(m_compiler, sources_string, target.get_file_path());
+        return res == 0 ? build::update_res::success : build::update_res::failed;
+    }
+    std::filesystem::path m_compiler;
 };
 
 #undef linux
@@ -229,9 +241,39 @@ enum class os {
 };
 #ifdef _WIN32
 constexpr auto current_os = os::win32;
+constexpr auto path_sep = ';';
 #else
 constexpr auto current_os = os::linux;
+constexpr auto path_sep = ':';
 #endif
+
+auto get_paths() {
+    auto env_path =  std::getenv("PATH");
+    auto paths = std::unordered_set<std::filesystem::path>{};
+
+    uint32_t s = 0;
+    while ('\0' != env_path[s]) {
+        auto next = strchr(env_path+s, path_sep);
+        if (next == NULL) {
+            paths.emplace(std::string{env_path+s});
+            break;
+        }
+        paths.emplace(std::string{env_path+s, next});
+        s = (next - env_path)+1;
+    }
+    return paths;
+}
+
+std::optional<std::filesystem::path> get_command(std::string command) {
+    auto paths = get_paths();
+    for (auto& path : paths) {
+        auto full_path = path / command;
+        if (exists(full_path)) {
+            return full_path;
+        }
+    }
+    return std::nullopt;
+}
 
 auto find_cxx_compiler() {
     if (current_os == os::win32) {
@@ -242,12 +284,25 @@ auto find_cxx_compiler() {
     }
 }
 
+std::string find_hip_compiler() {
+    if (auto compiler_path = get_command("amdclang++")) {
+        return compiler_path.value().string();
+    }
+    else if (exists(std::filesystem::path("/opt/rocm/bin/amdclang++"))) {
+        return "/opt/rocm/bin/amdclang++";
+    }
+    assert(0);
+}
+
 class builder {
 public:
-    builder() : m_cxx_compiler{find_cxx_compiler()} {
+    builder() :
+        m_cxx_compiler{find_cxx_compiler()},
+        m_hip_compiler{find_hip_compiler()}
+    {
     }
     void add_executable_help(std::string name, auto compile_action, std::convertible_to<std::string> auto... sources) {
-        auto sources_set = std::vector{sources...};
+        auto sources_set = std::vector<std::string>{sources...};
         auto sources_refs = std::vector<std::weak_ptr<build::file_object>>(sources_set.size());
         for (uint32_t i = 0; i < sources_set.size(); i++) {
             auto& source = sources_set[i];
@@ -272,7 +327,7 @@ public:
         add_executable_help(name, build::cpp_file_compile_action{m_cxx_compiler}, sources...);
     }
     void add_hip_executable(std::string name, std::convertible_to<std::string> auto... sources) {
-        add_executable_help(name, build::hip_file_compile_action{}, sources...);
+        add_executable_help(name, build::hip_file_compile_action{m_hip_compiler}, sources...);
     }
     void add_library(std::string name, std::convertible_to<std::string> auto... sources) {
         add_executable_help(name, [](const auto&){return build::update_res::success;}, sources...);
@@ -299,6 +354,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<build::file_object>> m_name_map;
     build::dependency_graph<> m_graph;
     std::filesystem::path m_cxx_compiler;
+    std::filesystem::path m_hip_compiler;
 };
 
 }
