@@ -151,7 +151,14 @@ auto c_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::
     std::ranges::for_each(
             src,
             [&sources](auto s) {
-                if (std::filesystem::is_directory(s)) {
+                if (s.starts_with("-l") || s.starts_with("-L")) {
+                    // Raw link flag passthrough, for system libraries that
+                    // have no single canonical .so path (e.g. avformat is
+                    // shipped under a versioned subdirectory on some
+                    // distros), instead of requiring a real file on disk.
+                    sources += " " + s;
+                }
+                else if (std::filesystem::is_directory(s)) {
                     sources += " -I" + s;
                 }
                 else if (s.ends_with(".hpp")) {}
