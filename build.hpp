@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cassert>
 #include <string_view>
+#include <format>
+#include <optional>
 
 namespace build {
 
@@ -156,7 +158,13 @@ auto c_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::
                 else if (s.ends_with(".so")) {
                     auto s_path = std::filesystem::path{s};
                     auto name = s_path.filename().string();
-                    auto link_name = std::string_view{name.data()+3, name.size()-3};
+                    // Strip both the "lib" prefix (3 chars) and the ".so"
+                    // suffix (3 chars), e.g. "libz.so" -> "z". The previous
+                    // code only subtracted 3 once, leaving the ".so" suffix
+                    // in place (e.g. "libz.so" -> "z.so"), which produces a
+                    // bogus "-lz.so" link flag; amdclang_plus_plus_compile
+                    // below already does this subtraction correctly.
+                    auto link_name = std::string_view{name.data()+3, name.size()-6};
                     sources += " -l";
                     sources += link_name;
                 }
