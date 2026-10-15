@@ -232,6 +232,38 @@ auto amdclang_plus_plus_compile(std::filesystem::path compiler, const std::vecto
     return system(command.c_str());
 }
 
+// Delegates a subdirectory to its OWN existing CMakeLists.txt instead of
+// hand-reproducing its build logic. For vendored, not-locally-maintained
+// dependencies (e.g. GLFW, FreeType, SPIRV-Headers) that already have a
+// working CMake build, reimplementing their compiler flags/codegen in
+// build_helper is wasted, error-prone work; just configure+build them with
+// real CMake, out-of-source, and link the resulting artifact. Configures
+// once (skipped if build_dir/CMakeCache.txt already exists) and always
+// re-runs the build step, so repeated calls are a cheap incremental build,
+// not a reconfigure.
+auto cmake_build(const std::filesystem::path& source_dir,
+        const std::filesystem::path& build_dir,
+        const std::string& target,
+        const std::vector<std::string>& cmake_args = {}) {
+    std::filesystem::create_directories(build_dir);
+    if (!std::filesystem::exists(build_dir / "CMakeCache.txt")) {
+        std::string args;
+        for (auto& a : cmake_args) {
+            args += " " + a;
+        }
+        auto configure_command = std::format("cmake -S {} -B {}{}",
+                source_dir.string(), build_dir.string(), args);
+        std::cout << configure_command << std::endl;
+        if (system(configure_command.c_str()) != 0) {
+            return 1;
+        }
+    }
+    auto build_command = std::format("cmake --build {} --target {}",
+            build_dir.string(), target);
+    std::cout << build_command << std::endl;
+    return system(build_command.c_str());
+}
+
 // Compiles ONE source file to an object file with its own compiler and
 // flags, instead of c_plus_plus_compile/amdclang_plus_plus_compile's
 // whole-program single-command model. This is what lets a HIP source
