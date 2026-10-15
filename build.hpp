@@ -146,7 +146,18 @@ auto file(std::filesystem::path path, std::vector<std::weak_ptr<build::file_obje
     );
 }
 
+// Out-of-source/separate-build-directory support: an output_path's parent
+// directory (e.g. a build directory distinct from the source tree) may not
+// exist yet; create it instead of letting the compiler/linker fail with
+// "No such file or directory".
+void ensure_parent_directory(const std::filesystem::path& output_path) {
+    if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path());
+    }
+}
+
 auto c_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::string>& src, const std::filesystem::path& output_path) {
+    ensure_parent_directory(output_path);
     std::string sources = "";
     std::ranges::for_each(
             src,
@@ -191,6 +202,7 @@ auto c_plus_plus_compile(std::filesystem::path compiler, const std::string src, 
     return c_plus_plus_compile(compiler, std::vector<std::string>{src}, output_path);
 }
 auto amdclang_plus_plus_compile(std::filesystem::path compiler, const std::vector<std::string>& src, const std::filesystem::path& output_path) {
+    ensure_parent_directory(output_path);
     std::string sources = "";
     std::ranges::for_each(
             src,
@@ -231,6 +243,7 @@ auto compile_object(std::filesystem::path compiler,
         const std::vector<std::string>& extra_flags,
         const std::filesystem::path& src,
         const std::filesystem::path& obj_output) {
+    ensure_parent_directory(obj_output);
     std::string flags = "";
     for (auto& f : extra_flags) {
         flags += " " + f;
@@ -247,6 +260,7 @@ auto compile_object(std::filesystem::path compiler,
 auto link_objects(std::filesystem::path linker,
         const std::vector<std::string>& objects_and_libs,
         const std::filesystem::path& output_path) {
+    ensure_parent_directory(output_path);
     std::string args = "";
     std::ranges::for_each(
             objects_and_libs,
@@ -385,14 +399,33 @@ std::string find_hip_compiler() {
 
 class builder {
 public:
-    builder() :
+    builder() : builder(std::filesystem::path{}) {
+    }
+    // build_directory: when set, every target's output path is placed under
+    // this directory instead of wherever the caller's cwd happens to be
+    // (CMake's out-of-source build-dir model), and the directory is created
+    // up front. A relative path already starting with build_directory, or
+    // any absolute path, is left as-is, so callers can still opt out
+    // per-target.
+    explicit builder(std::filesystem::path build_directory) :
         m_cxx_compiler{find_cxx_compiler()},
-        m_hip_compiler{find_hip_compiler()}
+        m_hip_compiler{find_hip_compiler()},
+        m_build_directory{std::move(build_directory)}
     {
+        if (!m_build_directory.empty()) {
+            std::filesystem::create_directories(m_build_directory);
+        }
+    }
+    std::filesystem::path resolve_output_path(const std::filesystem::path& path) const {
+        if (m_build_directory.empty() || path.is_absolute()) {
+            return path;
+        }
+        return m_build_directory / path;
     }
     void add_executable_help(std::string name, std::filesystem::path path,
             auto compile_action,
             std::convertible_to<std::string> auto... sources) {
+        path = resolve_output_path(path);
         auto sources_set = std::vector<std::string>{sources...};
         auto sources_refs = std::vector<std::weak_ptr<build::file_object>>(sources_set.size());
         for (uint32_t i = 0; i < sources_set.size(); i++) {
@@ -451,6 +484,7 @@ private:
     build::dependency_graph<> m_graph;
     std::filesystem::path m_cxx_compiler;
     std::filesystem::path m_hip_compiler;
+    std::filesystem::path m_build_directory;
 };
 
 }
