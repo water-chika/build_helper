@@ -220,6 +220,59 @@ auto amdclang_plus_plus_compile(std::filesystem::path compiler, const std::vecto
     return system(command.c_str());
 }
 
+// Compiles ONE source file to an object file with its own compiler and
+// flags, instead of c_plus_plus_compile/amdclang_plus_plus_compile's
+// whole-program single-command model. This is what lets a HIP source
+// (needs amdclang++ -x hip) and plain C/C++ sources (need the host
+// compiler, and must NOT have -x hip forced onto them) coexist in one
+// final executable, the same way CMake does it: each gets its own
+// target/compile step, and only the link step combines them.
+auto compile_object(std::filesystem::path compiler,
+        const std::vector<std::string>& extra_flags,
+        const std::filesystem::path& src,
+        const std::filesystem::path& obj_output) {
+    std::string flags = "";
+    for (auto& f : extra_flags) {
+        flags += " " + f;
+    }
+    auto command = std::format("{}{} -c {} -o {}",
+            compiler.string(), flags, src.string(), obj_output.string());
+    std::cout << command << std::endl;
+    return system(command.c_str());
+}
+
+// Links already-compiled object files (and raw -l/.so library deps, reusing
+// the same classification as c_plus_plus_compile) into one executable, with
+// a plain host linker invocation - no -x hip, no per-file language flags.
+auto link_objects(std::filesystem::path linker,
+        const std::vector<std::string>& objects_and_libs,
+        const std::filesystem::path& output_path) {
+    std::string args = "";
+    std::ranges::for_each(
+            objects_and_libs,
+            [&args](auto s) {
+                if (s.starts_with("-l") || s.starts_with("-L")) {
+                    args += " " + s;
+                }
+                else if (s.ends_with(".so")) {
+                    auto s_path = std::filesystem::path{s};
+                    auto name = s_path.filename().string();
+                    auto link_name = std::string_view{name.data()+3, name.size()-6};
+                    args += " -l";
+                    args += link_name;
+                }
+                else if (s.ends_with(".o")) {
+                    args += " " + s;
+                }
+                else {
+                    throw std::runtime_error{"not known link dependency: " + s};
+                }
+            });
+    auto command = std::format("{} {} -o {}", linker.string(), args, output_path.string());
+    std::cout << command << std::endl;
+    return system(command.c_str());
+}
+
 struct cpp_file_compile_action {
     auto operator()(const auto& target){
         auto weak_sources = target.get_dependencies();
